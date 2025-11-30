@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+use wast::annotation;
 use wast::parser::{self, Parse, ParseBuffer, Parser};
 use witx::{Documentation, Instruction, Representable, WasmType};
 
@@ -197,13 +198,14 @@ impl WitxtRunner<'_> {
                 wasm,
                 interface,
                 wasm_signature: (wasm_params, wasm_results),
+                abi,
                 ..
             } => {
+                let abi = abi.unwrap_or(witx::Abi::Preview1);
                 let doc = witx.document(contents, test)?;
                 let module = doc.modules().next().ok_or_else(|| anyhow!("no modules"))?;
                 let func = module.funcs().next().ok_or_else(|| anyhow!("no funcs"))?;
-
-                let (params, results) = func.wasm_signature();
+                let (params, results) = func.wasm_signature(abi);
                 if params != wasm_params {
                     bail!("expected params {:?}, found {:?}", wasm_params, params);
                 }
@@ -216,10 +218,11 @@ impl WitxtRunner<'_> {
                     err: None,
                     contents,
                 };
-                func.call_wasm(&module.name, &mut check);
+
+                func.call_wasm(&module.name, &mut check, abi);
                 check.check()?;
                 check.abi = interface.instrs.iter();
-                func.call_interface(&module.name, &mut check);
+                func.call_interface(&module.name, &mut check, abi);
                 check.check()?;
             }
         }
@@ -343,7 +346,9 @@ impl witx::Bindgen for AbiBindgen<'_> {
             I32FromS8 => self.assert("i32.from_s8"),
             I32FromChar8 => self.assert("i32.from_char8"),
             I32FromPointer => self.assert("i32.from_pointer"),
+            I64FromPointer => self.assert("i64.from_pointer"),
             I32FromConstPointer => self.assert("i32.from_const_pointer"),
+            I64FromConstPointer => self.assert("i64.from_const_pointer"),
             I32FromHandle { .. } => self.assert("i32.from_handle"),
             ListPointerLength => self.assert("list.pointer_length"),
             ListFromPointerLength { .. } => self.assert("list.from_pointer_length"),
@@ -403,6 +408,7 @@ impl witx::Bindgen for AbiBindgen<'_> {
 }
 
 mod kw {
+    wast::custom_keyword!(abi);
     wast::custom_keyword!(assert_invalid);
     wast::custom_keyword!(assert_representable);
     wast::custom_keyword!(assert_abi);
@@ -455,6 +461,7 @@ enum WitxtDirective<'a> {
         wasm_signature: (Vec<WasmType>, Vec<WasmType>),
         wasm: Abi<'a>,
         interface: Abi<'a>,
+        abi: Option<witx::Abi>,
     },
 }
 
@@ -526,6 +533,21 @@ impl<'a> Parse<'a> for WitxtDirective<'a> {
                     p.parse::<kw::call_interface>()?;
                     p.parse()
                 })?,
+                abi: if parser.peek::<wast::LParen>() {
+                    Some(parser.parens(|p| {
+                        p.parse::<kw::abi>()?;
+
+                        let abi = p.parse::<wast::Id>()?;
+
+                        match abi.name() {
+                            "preview1" => Ok(witx::Abi::Preview1),
+                            "preview1-memory64" => Ok(witx::Abi::Preview1Memory64),
+                            _ => Err(wast::Error::new(abi.span(), "unknown ABI".to_string())),
+                        }
+                    })?)
+                } else {
+                    None
+                },
             })
         } else {
             Err(l.error())

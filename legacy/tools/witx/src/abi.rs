@@ -57,6 +57,8 @@ pub enum Abi {
     /// Note that this ABI is limited notably in its return values where it can
     /// only return 0 results or one `Result<T, enum>` lookalike.
     Preview1,
+
+    Preview1Memory64,
 }
 
 // Helper macro for defining instructions without having to have tons of
@@ -127,7 +129,8 @@ def_instruction! {
         /// interface types parameters.
         GetArg { nth: usize } : [0] => [1],
         /// Takes the value off the top of the stack and writes it into linear
-        /// memory. Pushes the address in linear memory as an `i32`.
+        /// memory. Pushes the address in linear memory as an `i32` or an `i64`
+        /// if the ABI is for memory64.
         AddrOf : [1] => [1],
         /// Converts an interface type `char` value to a 32-bit integer
         /// representing the unicode scalar value.
@@ -154,10 +157,13 @@ def_instruction! {
         I32FromChar8 : [1] => [1],
         /// Converts a language-specific pointer value to a wasm `i32`.
         I32FromPointer : [1] => [1],
+        I64FromPointer : [1] => [1],
         /// Converts a language-specific pointer value to a wasm `i32`.
         I32FromConstPointer : [1] => [1],
+        I64FromConstPointer : [1] => [1],
         /// Converts a language-specific handle value to a wasm `i32`.
         I32FromHandle { ty: &'a NamedType } : [1] => [1],
+        /// Converts a language-specific handle value to a wasm `i64`.
         /// Converts a language-specific record-of-bools to the packed
         /// representation as an `i32`.
         I32FromBitflags { ty: &'a NamedType } : [1] => [1],
@@ -327,7 +333,6 @@ impl Abi {
         _params: &[InterfaceFuncParam],
         results: &[InterfaceFuncParam],
     ) -> Result<(), String> {
-        assert_eq!(*self, Abi::Preview1);
         match results.len() {
             0 => {}
             1 => match &**results[0].tref.type_() {
@@ -408,6 +413,7 @@ pub trait Bindgen {
         inst: &Instruction<'_>,
         operands: &mut Vec<Self::Operand>,
         results: &mut Vec<Self::Operand>,
+        abi: Abi,
     );
 
     /// Allocates temporary space in linear memory indexed by `slot` with enough
@@ -449,8 +455,7 @@ impl InterfaceFunc {
     ///
     /// The first entry returned is the list of parameters and the second entry
     /// is the list of results for the wasm function signature.
-    pub fn wasm_signature(&self) -> (Vec<WasmType>, Vec<WasmType>) {
-        assert_eq!(self.abi, Abi::Preview1);
+    pub fn wasm_signature(&self, abi: Abi) -> (Vec<WasmType>, Vec<WasmType>) {
         let mut params = Vec::new();
         let mut results = Vec::new();
         for param in self.params.iter() {
@@ -462,14 +467,20 @@ impl InterfaceFunc {
                 | Type::Builtin(BuiltinType::S32)
                 | Type::Builtin(BuiltinType::U32 { .. })
                 | Type::Builtin(BuiltinType::Char)
-                | Type::Pointer(_)
-                | Type::ConstPointer(_)
                 | Type::Handle(_)
                 | Type::Variant(_) => params.push(WasmType::I32),
 
+                Type::Pointer(_) | Type::ConstPointer(_) => match abi {
+                    Abi::Preview1 => params.push(WasmType::I32),
+                    Abi::Preview1Memory64 => params.push(WasmType::I64),
+                },
+
                 Type::Record(r) => match r.bitflags_repr() {
                     Some(repr) => params.push(WasmType::from(repr)),
-                    None => params.push(WasmType::I32),
+                    None => match abi {
+                        Abi::Preview1 => params.push(WasmType::I32),
+                        Abi::Preview1Memory64 => params.push(WasmType::I64),
+                    },
                 },
 
                 Type::Builtin(BuiltinType::S64) | Type::Builtin(BuiltinType::U64) => {
@@ -479,10 +490,16 @@ impl InterfaceFunc {
                 Type::Builtin(BuiltinType::F32) => params.push(WasmType::F32),
                 Type::Builtin(BuiltinType::F64) => params.push(WasmType::F64),
 
-                Type::List(_) => {
-                    params.push(WasmType::I32);
-                    params.push(WasmType::I32);
-                }
+                Type::List(_) => match abi {
+                    Abi::Preview1 => {
+                        params.push(WasmType::I32);
+                        params.push(WasmType::I32);
+                    }
+                    Abi::Preview1Memory64 => {
+                        params.push(WasmType::I64);
+                        params.push(WasmType::I64);
+                    }
+                },
             }
         }
 
@@ -552,9 +569,9 @@ impl InterfaceFunc {
     /// language-specific values into the wasm types to call a WASI function,
     /// and it will also automatically convert the results of the WASI function
     /// back to a language-specific value.
-    pub fn call_wasm(&self, module: &Id, bindgen: &mut impl Bindgen) {
-        assert_eq!(self.abi, Abi::Preview1);
+    pub fn call_wasm(&self, module: &Id, bindgen: &mut impl Bindgen, abi: Abi) {
         Generator {
+            abi,
             bindgen,
             operands: vec![],
             results: vec![],
@@ -566,9 +583,9 @@ impl InterfaceFunc {
     /// This is the dual of [`InterfaceFunc::call_wasm`], except that instead of
     /// calling a wasm signature it generates code to come from a wasm signature
     /// and call an interface types signature.
-    pub fn call_interface(&self, module: &Id, bindgen: &mut impl Bindgen) {
-        assert_eq!(self.abi, Abi::Preview1);
+    pub fn call_interface(&self, module: &Id, bindgen: &mut impl Bindgen, abi: Abi) {
         Generator {
+            abi,
             bindgen,
             operands: vec![],
             results: vec![],
@@ -579,6 +596,7 @@ impl InterfaceFunc {
 }
 
 struct Generator<'a, B: Bindgen> {
+    abi: Abi,
     bindgen: &'a mut B,
     operands: Vec<B::Operand>,
     results: Vec<B::Operand>,
@@ -601,7 +619,7 @@ impl<B: Bindgen> Generator<'_, B> {
             self.prep_return_pointer(&result.tref.type_());
         }
 
-        let (params, results) = func.wasm_signature();
+        let (params, results) = func.wasm_signature(self.abi);
         self.emit(&Instruction::CallWasm {
             module: module.as_str(),
             name: func.name.as_str(),
@@ -648,7 +666,7 @@ impl<B: Bindgen> Generator<'_, B> {
             self.lower(&result.tref, Some(&mut nth));
         }
 
-        let (_params, results) = func.wasm_signature();
+        let (_params, results) = func.wasm_signature(self.abi);
         self.emit(&Instruction::Return { amt: results.len() });
     }
 
@@ -667,7 +685,7 @@ impl<B: Bindgen> Generator<'_, B> {
         self.results.reserve(inst.results_len());
 
         self.bindgen
-            .emit(inst, &mut self.operands, &mut self.results);
+            .emit(inst, &mut self.operands, &mut self.results, self.abi);
 
         assert_eq!(
             self.results.len(),

@@ -699,14 +699,21 @@ impl<'a> ModuleValidation<'a> {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let noreturn = syntax.noreturn;
-                let abi = Abi::Preview1;
-                abi.validate(&params, &results)
+
+                Abi::Preview1
+                    .validate(&params, &results)
                     .map_err(|reason| ValidationError::Abi {
                         reason,
                         location: self.doc.location(syntax.export_loc),
                     })?;
+                Abi::Preview1Memory64
+                    .validate(&params, &results)
+                    .map_err(|reason| ValidationError::Abi {
+                        reason,
+                        location: self.doc.location(syntax.export_loc),
+                    })?;
+
                 let rc_func = Rc::new(InterfaceFunc {
-                    abi,
                     name: name.clone(),
                     params,
                     results,

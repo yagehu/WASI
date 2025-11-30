@@ -1,4 +1,3 @@
-use crate::Abi;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
@@ -567,7 +566,6 @@ pub enum ModuleImportVariant {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InterfaceFunc {
-    pub abi: Abi,
     pub name: Id,
     pub params: Vec<InterfaceFuncParam>,
     pub results: Vec<InterfaceFuncParam>,

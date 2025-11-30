@@ -127,6 +127,16 @@
   (call_wasm get-arg0 addr-of call.wasm return)
   (call_interface get-arg0 load call.interface return)
 )
+(assert_abi
+  (witx
+    (typename $a (record (field $x u8)))
+    (module $x (@interface func (export "f") (param $p $a)))
+  )
+  (wasm (param i64))
+  (call_wasm get-arg0 addr-of call.wasm return)
+  (call_interface get-arg0 load call.interface return)
+  (abi $preview1-memory64)
+)
 
 ;; handle parameter
 (assert_abi
@@ -138,6 +148,16 @@
   (call_wasm get-arg0 i32.from_handle call.wasm return)
   (call_interface get-arg0 handle.from_i32 call.interface return)
 )
+(assert_abi
+  (witx
+    (typename $a (handle))
+    (module $x (@interface func (export "f") (param $p $a)))
+  )
+  (wasm (param i32))
+  (call_wasm get-arg0 i32.from_handle call.wasm return)
+  (call_interface get-arg0 handle.from_i32 call.interface return)
+  (abi $preview1-memory64)
+)
 
 ;; list parameter
 (assert_abi
@@ -147,6 +167,15 @@
   (wasm (param i32 i32))
   (call_wasm get-arg0 list.pointer_length call.wasm return)
   (call_interface get-arg0 get-arg1 list.from_pointer_length call.interface return)
+)
+(assert_abi
+  (witx
+    (module $x (@interface func (export "f") (param $p (list u8))))
+  )
+  (wasm (param i64 i64))
+  (call_wasm get-arg0 list.pointer_length call.wasm return)
+  (call_interface get-arg0 get-arg1 list.from_pointer_length call.interface return)
+  (abi $preview1-memory64)
 )
 
 ;; variant parameter -- some not allowed at this time
