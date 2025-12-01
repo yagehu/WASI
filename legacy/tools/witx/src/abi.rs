@@ -455,7 +455,7 @@ impl InterfaceFunc {
     ///
     /// The first entry returned is the list of parameters and the second entry
     /// is the list of results for the wasm function signature.
-    pub fn wasm_signature(&self, abi: Abi) -> (Vec<WasmType>, Vec<WasmType>) {
+    pub fn wasm_signature(&self, abi: Abi) -> (Vec<WasmType>, Vec<(WasmType, bool)>) {
         let mut params = Vec::new();
         let mut results = Vec::new();
         for param in self.params.iter() {
@@ -510,29 +510,35 @@ impl InterfaceFunc {
                 | Type::Builtin(BuiltinType::S16)
                 | Type::Builtin(BuiltinType::U16)
                 | Type::Builtin(BuiltinType::S32)
-                | Type::Builtin(BuiltinType::U32 { .. })
+                | Type::Builtin(BuiltinType::U32 {
+                    lang_ptr_size: false,
+                })
                 | Type::Builtin(BuiltinType::Char)
                 | Type::Pointer(_)
                 | Type::ConstPointer(_)
-                | Type::Handle(_) => results.push(WasmType::I32),
+                | Type::Handle(_) => results.push((WasmType::I32, false)),
+
+                Type::Builtin(BuiltinType::U32 {
+                    lang_ptr_size: true,
+                }) => results.push((WasmType::I32, true)),
 
                 Type::Builtin(BuiltinType::S64) | Type::Builtin(BuiltinType::U64) => {
-                    results.push(WasmType::I64)
+                    results.push((WasmType::I64, false))
                 }
 
-                Type::Builtin(BuiltinType::F32) => results.push(WasmType::F32),
-                Type::Builtin(BuiltinType::F64) => results.push(WasmType::F64),
+                Type::Builtin(BuiltinType::F32) => results.push((WasmType::F32, false)),
+                Type::Builtin(BuiltinType::F64) => results.push((WasmType::F64, false)),
 
                 Type::Record(r) => match r.bitflags_repr() {
-                    Some(repr) => results.push(WasmType::from(repr)),
+                    Some(repr) => results.push((WasmType::from(repr), false)),
                     None => unreachable!(),
                 },
                 Type::List(_) => unreachable!(),
 
                 Type::Variant(v) => {
                     results.push(match v.tag_repr {
-                        IntRepr::U64 => WasmType::I64,
-                        IntRepr::U32 | IntRepr::U16 | IntRepr::U8 => WasmType::I32,
+                        IntRepr::U64 => (WasmType::I64, false),
+                        IntRepr::U32 | IntRepr::U16 | IntRepr::U8 => (WasmType::I32, false),
                     });
                     if v.is_enum() {
                         continue;
@@ -632,12 +638,13 @@ impl<B: Bindgen> Generator<'_, B> {
         }
 
         let (params, results) = func.wasm_signature(self.abi);
+        let results = results.into_iter().map(|(r, _)| r).collect::<Vec<_>>();
         self.emit(
             &Instruction::CallWasm {
                 module: module.as_str(),
                 name: func.name.as_str(),
                 params: &params,
-                results: &results,
+                results: results.as_slice(),
             },
             width,
         );

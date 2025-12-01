@@ -206,6 +206,7 @@ impl WitxtRunner<'_> {
                 let module = doc.modules().next().ok_or_else(|| anyhow!("no modules"))?;
                 let func = module.funcs().next().ok_or_else(|| anyhow!("no funcs"))?;
                 let (params, results) = func.wasm_signature(abi);
+                let results = results.into_iter().map(|(r, _)| r).collect::<Vec<_>>();
                 if params != wasm_params {
                     bail!("expected params {:?}, found {:?}", wasm_params, params);
                 }
