@@ -413,7 +413,7 @@ pub trait Bindgen {
         inst: &Instruction<'_>,
         operands: &mut Vec<Self::Operand>,
         results: &mut Vec<Self::Operand>,
-        abi: Abi,
+        width: &Self::Operand,
     );
 
     /// Allocates temporary space in linear memory indexed by `slot` with enough
@@ -569,7 +569,13 @@ impl InterfaceFunc {
     /// language-specific values into the wasm types to call a WASI function,
     /// and it will also automatically convert the results of the WASI function
     /// back to a language-specific value.
-    pub fn call_wasm(&self, module: &Id, bindgen: &mut impl Bindgen, abi: Abi) {
+    pub fn call_wasm<B: Bindgen>(
+        &self,
+        module: &Id,
+        bindgen: &mut B,
+        abi: Abi,
+        width: &B::Operand,
+    ) {
         Generator {
             abi,
             bindgen,
@@ -577,13 +583,19 @@ impl InterfaceFunc {
             results: vec![],
             stack: vec![],
         }
-        .call_wasm(module, self);
+        .call_wasm(module, self, width);
     }
 
     /// This is the dual of [`InterfaceFunc::call_wasm`], except that instead of
     /// calling a wasm signature it generates code to come from a wasm signature
     /// and call an interface types signature.
-    pub fn call_interface(&self, module: &Id, bindgen: &mut impl Bindgen, abi: Abi) {
+    pub fn call_interface<B: Bindgen>(
+        &self,
+        module: &Id,
+        bindgen: &mut B,
+        abi: Abi,
+        width: &B::Operand,
+    ) {
         Generator {
             abi,
             bindgen,
@@ -591,7 +603,7 @@ impl InterfaceFunc {
             results: vec![],
             stack: vec![],
         }
-        .call_interface(module, self);
+        .call_interface(module, self, width);
     }
 }
 
@@ -604,40 +616,46 @@ struct Generator<'a, B: Bindgen> {
 }
 
 impl<B: Bindgen> Generator<'_, B> {
-    fn call_wasm(&mut self, module: &Id, func: &InterfaceFunc) {
+    fn call_wasm(&mut self, module: &Id, func: &InterfaceFunc, width: &B::Operand) {
         // Translate all parameters which are interface values by lowering them
         // to their wasm types.
         for (nth, param) in func.params.iter().enumerate() {
-            self.emit(&Instruction::GetArg { nth });
-            self.lower(&param.tref, None);
+            self.emit(&Instruction::GetArg { nth }, width);
+            self.lower(&param.tref, None, width);
         }
 
         // If necessary for our ABI, insert return pointers for any returned
         // values through a result.
         assert!(func.results.len() < 2);
         if let Some(result) = func.results.get(0) {
-            self.prep_return_pointer(&result.tref.type_());
+            self.prep_return_pointer(&result.tref.type_(), width);
         }
 
         let (params, results) = func.wasm_signature(self.abi);
-        self.emit(&Instruction::CallWasm {
-            module: module.as_str(),
-            name: func.name.as_str(),
-            params: &params,
-            results: &results,
-        });
+        self.emit(
+            &Instruction::CallWasm {
+                module: module.as_str(),
+                name: func.name.as_str(),
+                params: &params,
+                results: &results,
+            },
+            width,
+        );
 
         // Lift the return value if one is present.
         if let Some(result) = func.results.get(0) {
-            self.lift(&result.tref, true);
+            self.lift(&result.tref, true, width);
         }
 
-        self.emit(&Instruction::Return {
-            amt: func.results.len(),
-        });
+        self.emit(
+            &Instruction::Return {
+                amt: func.results.len(),
+            },
+            width,
+        );
     }
 
-    fn call_interface(&mut self, module: &Id, func: &InterfaceFunc) {
+    fn call_interface(&mut self, module: &Id, func: &InterfaceFunc, width: &B::Operand) {
         // Lift all wasm parameters into interface types first.
         //
         // Note that consuming arguments is somewhat janky right now by manually
@@ -646,31 +664,34 @@ impl<B: Bindgen> Generator<'_, B> {
         // to consume arguments.
         let mut nth = 0;
         for param in func.params.iter() {
-            self.emit(&Instruction::GetArg { nth });
+            self.emit(&Instruction::GetArg { nth }, width);
             nth += 1;
             if let Type::List(_) = &**param.tref.type_() {
-                self.emit(&Instruction::GetArg { nth });
+                self.emit(&Instruction::GetArg { nth }, width);
                 nth += 1;
             }
-            self.lift(&param.tref, false);
+            self.lift(&param.tref, false, width);
         }
 
-        self.emit(&Instruction::CallInterface {
-            module: module.as_str(),
-            func,
-        });
+        self.emit(
+            &Instruction::CallInterface {
+                module: module.as_str(),
+                func,
+            },
+            width,
+        );
 
         // Like above the current ABI only has at most one result, so lower it
         // here if necessary.
         if let Some(result) = func.results.get(0) {
-            self.lower(&result.tref, Some(&mut nth));
+            self.lower(&result.tref, Some(&mut nth), width);
         }
 
         let (_params, results) = func.wasm_signature(self.abi);
-        self.emit(&Instruction::Return { amt: results.len() });
+        self.emit(&Instruction::Return { amt: results.len() }, width);
     }
 
-    fn emit(&mut self, inst: &Instruction<'_>) {
+    fn emit(&mut self, inst: &Instruction<'_>, width: &B::Operand) {
         self.operands.clear();
         self.results.clear();
 
@@ -680,12 +701,12 @@ impl<B: Bindgen> Generator<'_, B> {
             "not enough operands on stack for {:?}",
             inst
         );
+
         self.operands
             .extend(self.stack.drain((self.stack.len() - operands_len)..));
         self.results.reserve(inst.results_len());
-
         self.bindgen
-            .emit(inst, &mut self.operands, &mut self.results, self.abi);
+            .emit(inst, &mut self.operands, &mut self.results, width);
 
         assert_eq!(
             self.results.len(),
@@ -698,59 +719,65 @@ impl<B: Bindgen> Generator<'_, B> {
         self.stack.extend(self.results.drain(..));
     }
 
-    fn lower(&mut self, ty: &TypeRef, retptr: Option<&mut usize>) {
+    fn lower(&mut self, ty: &TypeRef, retptr: Option<&mut usize>, width: &B::Operand) {
         use Instruction::*;
         match &**ty.type_() {
-            Type::Builtin(BuiltinType::S8) => self.emit(&I32FromS8),
-            Type::Builtin(BuiltinType::U8 { lang_c_char: true }) => self.emit(&I32FromChar8),
-            Type::Builtin(BuiltinType::U8 { lang_c_char: false }) => self.emit(&I32FromU8),
-            Type::Builtin(BuiltinType::S16) => self.emit(&I32FromS16),
-            Type::Builtin(BuiltinType::U16) => self.emit(&I32FromU16),
-            Type::Builtin(BuiltinType::S32) => self.emit(&I32FromS32),
+            Type::Builtin(BuiltinType::S8) => self.emit(&I32FromS8, width),
+            Type::Builtin(BuiltinType::U8 { lang_c_char: true }) => self.emit(&I32FromChar8, width),
+            Type::Builtin(BuiltinType::U8 { lang_c_char: false }) => self.emit(&I32FromU8, width),
+            Type::Builtin(BuiltinType::S16) => self.emit(&I32FromS16, width),
+            Type::Builtin(BuiltinType::U16) => self.emit(&I32FromU16, width),
+            Type::Builtin(BuiltinType::S32) => self.emit(&I32FromS32, width),
             Type::Builtin(BuiltinType::U32 {
                 lang_ptr_size: true,
-            }) => self.emit(&I32FromUsize),
+            }) => self.emit(&I32FromUsize, width),
             Type::Builtin(BuiltinType::U32 {
                 lang_ptr_size: false,
-            }) => self.emit(&I32FromU32),
-            Type::Builtin(BuiltinType::S64) => self.emit(&I64FromS64),
-            Type::Builtin(BuiltinType::U64) => self.emit(&I64FromU64),
-            Type::Builtin(BuiltinType::Char) => self.emit(&I32FromChar),
-            Type::Pointer(_) => self.emit(&I32FromPointer),
-            Type::ConstPointer(_) => self.emit(&I32FromConstPointer),
-            Type::Handle(_) => self.emit(&I32FromHandle {
-                ty: match ty {
-                    TypeRef::Name(ty) => ty,
-                    _ => unreachable!(),
+            }) => self.emit(&I32FromU32, width),
+            Type::Builtin(BuiltinType::S64) => self.emit(&I64FromS64, width),
+            Type::Builtin(BuiltinType::U64) => self.emit(&I64FromU64, width),
+            Type::Builtin(BuiltinType::Char) => self.emit(&I32FromChar, width),
+            Type::Pointer(_) => self.emit(&I32FromPointer, width),
+            Type::ConstPointer(_) => self.emit(&I32FromConstPointer, width),
+            Type::Handle(_) => self.emit(
+                &I32FromHandle {
+                    ty: match ty {
+                        TypeRef::Name(ty) => ty,
+                        _ => unreachable!(),
+                    },
                 },
-            }),
+                width,
+            ),
             Type::Record(r) => {
                 let ty = match ty {
                     TypeRef::Name(ty) => ty,
                     _ => unreachable!(),
                 };
                 match r.bitflags_repr() {
-                    Some(IntRepr::U64) => self.emit(&I64FromBitflags { ty }),
-                    Some(_) => self.emit(&I32FromBitflags { ty }),
-                    None => self.emit(&AddrOf),
+                    Some(IntRepr::U64) => self.emit(&I64FromBitflags { ty }, width),
+                    Some(_) => self.emit(&I32FromBitflags { ty }, width),
+                    None => self.emit(&AddrOf, width),
                 }
             }
             Type::Variant(v) => {
                 // Enum-like variants are simply lowered to their discriminant.
                 if v.is_enum() {
-                    return self.emit(&EnumLower {
-                        ty: match ty {
-                            TypeRef::Name(n) => n,
-                            _ => unreachable!(),
+                    return self.emit(
+                        &EnumLower {
+                            ty: match ty {
+                                TypeRef::Name(n) => n,
+                                _ => unreachable!(),
+                            },
                         },
-                    });
+                        width,
+                    );
                 }
 
                 // If this variant is in the return position then it's special,
                 // otherwise it's an argument and we just pass the address.
                 let retptr = match retptr {
                     Some(ptr) => ptr,
-                    None => return self.emit(&AddrOf),
+                    None => return self.emit(&AddrOf, width),
                 };
 
                 // For the return position we emit some blocks to lower the
@@ -762,19 +789,22 @@ impl<B: Bindgen> Generator<'_, B> {
                 let (ok, err) = v.as_expected().unwrap();
                 self.bindgen.push_block();
                 if let Some(ok) = ok {
-                    self.emit(&VariantPayload);
+                    self.emit(&VariantPayload, width);
                     let store = |me: &mut Self, ty: &TypeRef, n| {
-                        me.emit(&GetArg { nth: *retptr + n });
+                        me.emit(&GetArg { nth: *retptr + n }, width);
                         match ty {
-                            TypeRef::Name(ty) => me.emit(&Store { ty }),
+                            TypeRef::Name(ty) => me.emit(&Store { ty }, width),
                             _ => unreachable!(),
                         }
                     };
                     match &**ok.type_() {
                         Type::Record(r) if r.is_tuple() => {
-                            self.emit(&TupleLower {
-                                amt: r.members.len(),
-                            });
+                            self.emit(
+                                &TupleLower {
+                                    amt: r.members.len(),
+                                },
+                                width,
+                            );
                             // Note that `rev()` is used here due to the order
                             // that tuples are pushed onto the stack and how we
                             // consume the last item first from the stack.
@@ -789,23 +819,23 @@ impl<B: Bindgen> Generator<'_, B> {
 
                 self.bindgen.push_block();
                 let err_expr = if let Some(ty) = err {
-                    self.emit(&VariantPayload);
-                    self.lower(ty, None);
+                    self.emit(&VariantPayload, width);
+                    self.lower(ty, None, width);
                     Some(self.stack.pop().unwrap())
                 } else {
                     None
                 };
                 self.bindgen.finish_block(err_expr);
 
-                self.emit(&ResultLower { ok, err });
+                self.emit(&ResultLower { ok, err }, width);
             }
-            Type::Builtin(BuiltinType::F32) => self.emit(&F32FromIf32),
-            Type::Builtin(BuiltinType::F64) => self.emit(&F64FromIf64),
-            Type::List(_) => self.emit(&ListPointerLength),
+            Type::Builtin(BuiltinType::F32) => self.emit(&F32FromIf32, width),
+            Type::Builtin(BuiltinType::F64) => self.emit(&F64FromIf64, width),
+            Type::List(_) => self.emit(&ListPointerLength, width),
         }
     }
 
-    fn prep_return_pointer(&mut self, ty: &Type) {
+    fn prep_return_pointer(&mut self, ty: &Type, width: &B::Operand) {
         // Return pointers are only needed for `Result<T, _>`...
         let variant = match ty {
             Type::Variant(v) => v,
@@ -825,7 +855,7 @@ impl<B: Bindgen> Generator<'_, B> {
                 TypeRef::Name(ty) => self.bindgen.allocate_space(n, ty),
                 _ => unreachable!(),
             }
-            self.emit(&Instruction::ReturnPointerGet { n });
+            self.emit(&Instruction::ReturnPointerGet { n }, width);
             n += 1;
         };
         match &**ok.type_() {
@@ -840,49 +870,58 @@ impl<B: Bindgen> Generator<'_, B> {
 
     // Note that in general everything in this function is the opposite of the
     // `lower` function above. This is intentional and should be kept this way!
-    fn lift(&mut self, ty: &TypeRef, is_return: bool) {
+    fn lift(&mut self, ty: &TypeRef, is_return: bool, width: &B::Operand) {
         use Instruction::*;
         match &**ty.type_() {
-            Type::Builtin(BuiltinType::S8) => self.emit(&S8FromI32),
-            Type::Builtin(BuiltinType::U8 { lang_c_char: true }) => self.emit(&Char8FromI32),
-            Type::Builtin(BuiltinType::U8 { lang_c_char: false }) => self.emit(&U8FromI32),
-            Type::Builtin(BuiltinType::S16) => self.emit(&S16FromI32),
-            Type::Builtin(BuiltinType::U16) => self.emit(&U16FromI32),
-            Type::Builtin(BuiltinType::S32) => self.emit(&S32FromI32),
+            Type::Builtin(BuiltinType::S8) => self.emit(&S8FromI32, width),
+            Type::Builtin(BuiltinType::U8 { lang_c_char: true }) => self.emit(&Char8FromI32, width),
+            Type::Builtin(BuiltinType::U8 { lang_c_char: false }) => self.emit(&U8FromI32, width),
+            Type::Builtin(BuiltinType::S16) => self.emit(&S16FromI32, width),
+            Type::Builtin(BuiltinType::U16) => self.emit(&U16FromI32, width),
+            Type::Builtin(BuiltinType::S32) => self.emit(&S32FromI32, width),
             Type::Builtin(BuiltinType::U32 {
                 lang_ptr_size: true,
-            }) => self.emit(&UsizeFromI32),
+            }) => self.emit(&UsizeFromI32, width),
             Type::Builtin(BuiltinType::U32 {
                 lang_ptr_size: false,
-            }) => self.emit(&U32FromI32),
-            Type::Builtin(BuiltinType::S64) => self.emit(&S64FromI64),
-            Type::Builtin(BuiltinType::U64) => self.emit(&U64FromI64),
-            Type::Builtin(BuiltinType::Char) => self.emit(&CharFromI32),
-            Type::Builtin(BuiltinType::F32) => self.emit(&If32FromF32),
-            Type::Builtin(BuiltinType::F64) => self.emit(&If64FromF64),
-            Type::Pointer(ty) => self.emit(&PointerFromI32 { ty }),
-            Type::ConstPointer(ty) => self.emit(&ConstPointerFromI32 { ty }),
-            Type::Handle(_) => self.emit(&HandleFromI32 {
-                ty: match ty {
-                    TypeRef::Name(ty) => ty,
-                    _ => unreachable!(),
+            }) => self.emit(&U32FromI32, width),
+            Type::Builtin(BuiltinType::S64) => self.emit(&S64FromI64, width),
+            Type::Builtin(BuiltinType::U64) => self.emit(&U64FromI64, width),
+            Type::Builtin(BuiltinType::Char) => self.emit(&CharFromI32, width),
+            Type::Builtin(BuiltinType::F32) => self.emit(&If32FromF32, width),
+            Type::Builtin(BuiltinType::F64) => self.emit(&If64FromF64, width),
+            Type::Pointer(ty) => self.emit(&PointerFromI32 { ty }, width),
+            Type::ConstPointer(ty) => self.emit(&ConstPointerFromI32 { ty }, width),
+            Type::Handle(_) => self.emit(
+                &HandleFromI32 {
+                    ty: match ty {
+                        TypeRef::Name(ty) => ty,
+                        _ => unreachable!(),
+                    },
                 },
-            }),
+                width,
+            ),
             Type::Variant(v) => {
                 if v.is_enum() {
-                    return self.emit(&EnumLift {
-                        ty: match ty {
-                            TypeRef::Name(n) => n,
-                            _ => unreachable!(),
+                    return self.emit(
+                        &EnumLift {
+                            ty: match ty {
+                                TypeRef::Name(n) => n,
+                                _ => unreachable!(),
+                            },
                         },
-                    });
+                        width,
+                    );
                 } else if !is_return {
-                    return self.emit(&Load {
-                        ty: match ty {
-                            TypeRef::Name(n) => n,
-                            _ => unreachable!(),
+                    return self.emit(
+                        &Load {
+                            ty: match ty {
+                                TypeRef::Name(n) => n,
+                                _ => unreachable!(),
+                            },
                         },
-                    });
+                        width,
+                    );
                 }
 
                 let (ok, err) = v.as_expected().unwrap();
@@ -890,10 +929,10 @@ impl<B: Bindgen> Generator<'_, B> {
                 let ok_expr = if let Some(ok) = ok {
                     let mut n = 0;
                     let mut load = |ty: &TypeRef| {
-                        self.emit(&ReturnPointerGet { n });
+                        self.emit(&ReturnPointerGet { n }, width);
                         n += 1;
                         match ty {
-                            TypeRef::Name(ty) => self.emit(&Load { ty }),
+                            TypeRef::Name(ty) => self.emit(&Load { ty }, width),
                             _ => unreachable!(),
                         }
                     };
@@ -902,9 +941,12 @@ impl<B: Bindgen> Generator<'_, B> {
                             for member in r.members.iter() {
                                 load(&member.tref);
                             }
-                            self.emit(&TupleLift {
-                                amt: r.members.len(),
-                            });
+                            self.emit(
+                                &TupleLift {
+                                    amt: r.members.len(),
+                                },
+                                width,
+                            );
                         }
                         _ => load(ok),
                     }
@@ -916,15 +958,15 @@ impl<B: Bindgen> Generator<'_, B> {
 
                 self.bindgen.push_block();
                 let err_expr = if let Some(ty) = err {
-                    self.emit(&ReuseReturn);
-                    self.lift(ty, false);
+                    self.emit(&ReuseReturn, width);
+                    self.lift(ty, false, width);
                     Some(self.stack.pop().unwrap())
                 } else {
                     None
                 };
                 self.bindgen.finish_block(err_expr);
 
-                self.emit(&ResultLift);
+                self.emit(&ResultLift, width);
             }
             Type::Record(r) => {
                 let ty = match ty {
@@ -932,12 +974,12 @@ impl<B: Bindgen> Generator<'_, B> {
                     _ => unreachable!(),
                 };
                 match r.bitflags_repr() {
-                    Some(IntRepr::U64) => self.emit(&BitflagsFromI64 { ty }),
-                    Some(_) => self.emit(&BitflagsFromI32 { ty }),
-                    None => self.emit(&Load { ty }),
+                    Some(IntRepr::U64) => self.emit(&BitflagsFromI64 { ty }, width),
+                    Some(_) => self.emit(&BitflagsFromI32 { ty }, width),
+                    None => self.emit(&Load { ty }, width),
                 }
             }
-            Type::List(ty) => self.emit(&ListFromPointerLength { ty }),
+            Type::List(ty) => self.emit(&ListFromPointerLength { ty }, width),
         }
     }
 }
