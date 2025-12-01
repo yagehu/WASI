@@ -96,14 +96,14 @@ pub struct RecordMemberLayout<'a> {
 }
 
 impl RecordDatatype {
-    pub fn member_layout(&self) -> Vec<RecordMemberLayout> {
+    pub fn member_layout(&self) -> Vec<RecordMemberLayout<'_>> {
         self.member_layout_(&mut HashMap::new()).1
     }
 
     fn member_layout_(
         &self,
         cache: &mut HashMap<TypeRef, SizeAlign>,
-    ) -> (SizeAlign, Vec<RecordMemberLayout>) {
+    ) -> (SizeAlign, Vec<RecordMemberLayout<'_>>) {
         let mut members = Vec::new();
         let mut sa = SizeAlign::zero();
         for m in self.members.iter() {

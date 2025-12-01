@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
-use wast::annotation;
 use wast::parser::{self, Parse, ParseBuffer, Parser};
 use witx::{Documentation, Instruction, Representable, WasmType};
 
@@ -325,6 +324,8 @@ impl AbiBindgen<'_> {
 
 impl witx::Bindgen for AbiBindgen<'_> {
     type Operand = ();
+    type Width = ();
+
     fn emit(
         &mut self,
         inst: &Instruction<'_>,

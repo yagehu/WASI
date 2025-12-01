@@ -30,7 +30,6 @@ pub(super) trait MdElement: fmt::Display + fmt::Debug + 'static {
     /// Sets `docs`, the "docs" of this `MdElement`.
     fn set_docs(&mut self, docs: &str);
 
-    fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
@@ -113,23 +112,23 @@ impl MdNodeRef {
         child_ref
     }
 
-    pub fn borrow(&self) -> cell::Ref<MdNode> {
+    pub fn borrow(&self) -> cell::Ref<'_, MdNode> {
         self.0.borrow()
     }
 
-    pub fn borrow_mut(&self) -> cell::RefMut<MdNode> {
+    pub fn borrow_mut(&self) -> cell::RefMut<'_, MdNode> {
         self.0.borrow_mut()
     }
 
     /// Returns an immutable reference to `MdNode`'s `content` as-is, that
     /// is as some type implementing the `MdElement` trait.
-    pub fn any_ref(&self) -> cell::Ref<Box<dyn MdElement>> {
+    pub fn any_ref(&self) -> cell::Ref<'_, Box<dyn MdElement>> {
         cell::Ref::map(self.borrow(), |b| &b.content)
     }
 
     /// Returns a mutable reference to `MdNode`'s `content` as-is, that
     /// is as some type implementing the `MdElement` trait.
-    pub fn any_ref_mut(&self) -> cell::RefMut<Box<dyn MdElement>> {
+    pub fn any_ref_mut(&self) -> cell::RefMut<'_, Box<dyn MdElement>> {
         cell::RefMut::map(self.borrow_mut(), |b| &mut b.content)
     }
 
@@ -137,7 +136,7 @@ impl MdNodeRef {
     /// `T` which implements `MdElement` trait.
     ///
     /// Panics if `content` cannot be downcast to `T`.
-    pub fn content_ref_mut<T: MdElement + 'static>(&self) -> cell::RefMut<T> {
+    pub fn content_ref_mut<T: MdElement + 'static>(&self) -> cell::RefMut<'_, T> {
         cell::RefMut::map(self.borrow_mut(), |b| {
             let r = b.content.as_any_mut();
             r.downcast_mut::<T>().expect("reference is not T type")
@@ -179,10 +178,6 @@ impl MdElement for MdRoot {
     }
 
     fn set_docs(&mut self, _: &str) {}
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
@@ -273,10 +268,6 @@ impl MdElement for MdSection {
 
     fn set_docs(&mut self, _: &str) {}
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
@@ -348,10 +339,6 @@ impl MdElement for MdNamedType {
 
     fn set_docs(&mut self, docs: &str) {
         self.docs = docs.to_owned();
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
@@ -432,10 +419,6 @@ impl MdElement for MdFunc {
 
     fn set_docs(&mut self, docs: &str) {
         self.docs = docs.to_owned();
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {

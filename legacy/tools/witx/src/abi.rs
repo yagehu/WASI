@@ -400,6 +400,8 @@ pub trait Bindgen {
     /// For most languages `String` is a suitable intermediate type.
     type Operand;
 
+    type Width;
+
     /// Emit code to implement the given instruction.
     ///
     /// Each operand is given in `operands` and can be popped off if ownership
@@ -413,7 +415,7 @@ pub trait Bindgen {
         inst: &Instruction<'_>,
         operands: &mut Vec<Self::Operand>,
         results: &mut Vec<Self::Operand>,
-        width: &Self::Operand,
+        width: &Self::Width,
     );
 
     /// Allocates temporary space in linear memory indexed by `slot` with enough
@@ -575,13 +577,7 @@ impl InterfaceFunc {
     /// language-specific values into the wasm types to call a WASI function,
     /// and it will also automatically convert the results of the WASI function
     /// back to a language-specific value.
-    pub fn call_wasm<B: Bindgen>(
-        &self,
-        module: &Id,
-        bindgen: &mut B,
-        abi: Abi,
-        width: &B::Operand,
-    ) {
+    pub fn call_wasm<B: Bindgen>(&self, module: &Id, bindgen: &mut B, abi: Abi, width: &B::Width) {
         Generator {
             abi,
             bindgen,
@@ -600,7 +596,7 @@ impl InterfaceFunc {
         module: &Id,
         bindgen: &mut B,
         abi: Abi,
-        width: &B::Operand,
+        width: &B::Width,
     ) {
         Generator {
             abi,
@@ -622,7 +618,7 @@ struct Generator<'a, B: Bindgen> {
 }
 
 impl<B: Bindgen> Generator<'_, B> {
-    fn call_wasm(&mut self, module: &Id, func: &InterfaceFunc, width: &B::Operand) {
+    fn call_wasm(&mut self, module: &Id, func: &InterfaceFunc, width: &B::Width) {
         // Translate all parameters which are interface values by lowering them
         // to their wasm types.
         for (nth, param) in func.params.iter().enumerate() {
@@ -662,7 +658,7 @@ impl<B: Bindgen> Generator<'_, B> {
         );
     }
 
-    fn call_interface(&mut self, module: &Id, func: &InterfaceFunc, width: &B::Operand) {
+    fn call_interface(&mut self, module: &Id, func: &InterfaceFunc, width: &B::Width) {
         // Lift all wasm parameters into interface types first.
         //
         // Note that consuming arguments is somewhat janky right now by manually
@@ -698,7 +694,7 @@ impl<B: Bindgen> Generator<'_, B> {
         self.emit(&Instruction::Return { amt: results.len() }, width);
     }
 
-    fn emit(&mut self, inst: &Instruction<'_>, width: &B::Operand) {
+    fn emit(&mut self, inst: &Instruction<'_>, width: &B::Width) {
         self.operands.clear();
         self.results.clear();
 
@@ -726,7 +722,7 @@ impl<B: Bindgen> Generator<'_, B> {
         self.stack.extend(self.results.drain(..));
     }
 
-    fn lower(&mut self, ty: &TypeRef, retptr: Option<&mut usize>, width: &B::Operand) {
+    fn lower(&mut self, ty: &TypeRef, retptr: Option<&mut usize>, width: &B::Width) {
         use Instruction::*;
         match &**ty.type_() {
             Type::Builtin(BuiltinType::S8) => self.emit(&I32FromS8, width),
@@ -842,7 +838,7 @@ impl<B: Bindgen> Generator<'_, B> {
         }
     }
 
-    fn prep_return_pointer(&mut self, ty: &Type, width: &B::Operand) {
+    fn prep_return_pointer(&mut self, ty: &Type, width: &B::Width) {
         // Return pointers are only needed for `Result<T, _>`...
         let variant = match ty {
             Type::Variant(v) => v,
@@ -877,7 +873,7 @@ impl<B: Bindgen> Generator<'_, B> {
 
     // Note that in general everything in this function is the opposite of the
     // `lower` function above. This is intentional and should be kept this way!
-    fn lift(&mut self, ty: &TypeRef, is_return: bool, width: &B::Operand) {
+    fn lift(&mut self, ty: &TypeRef, is_return: bool, width: &B::Width) {
         use Instruction::*;
         match &**ty.type_() {
             Type::Builtin(BuiltinType::S8) => self.emit(&S8FromI32, width),
