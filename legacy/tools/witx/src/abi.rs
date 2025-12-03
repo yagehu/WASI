@@ -547,10 +547,16 @@ impl InterfaceFunc {
                         match &**ty.type_() {
                             Type::Record(r) if r.is_tuple() => {
                                 for _ in 0..r.members.len() {
-                                    params.push(WasmType::I32);
+                                    match abi {
+                                        Abi::Preview1 => params.push(WasmType::I32),
+                                        Abi::Preview1Memory64 => params.push(WasmType::I64),
+                                    }
                                 }
                             }
-                            _ => params.push(WasmType::I32),
+                            _ => match abi {
+                                Abi::Preview1 => params.push(WasmType::I32),
+                                Abi::Preview1Memory64 => params.push(WasmType::I64),
+                            },
                         }
                     }
                 }
