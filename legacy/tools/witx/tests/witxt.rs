@@ -219,10 +219,10 @@ impl WitxtRunner<'_> {
                     contents,
                 };
 
-                func.call_wasm(&module.name, &mut check, abi, &());
+                func.call_wasm(&module.name, &mut check, abi);
                 check.check()?;
                 check.abi = interface.instrs.iter();
-                func.call_interface(&module.name, &mut check, abi, &());
+                func.call_interface(&module.name, &mut check, abi);
                 check.check()?;
             }
         }
@@ -324,14 +324,12 @@ impl AbiBindgen<'_> {
 
 impl witx::Bindgen for AbiBindgen<'_> {
     type Operand = ();
-    type Width = ();
 
     fn emit(
         &mut self,
         inst: &Instruction<'_>,
         _operands: &mut Vec<Self::Operand>,
         results: &mut Vec<Self::Operand>,
-        _width: &Self::Operand,
     ) {
         use witx::Instruction::*;
         match inst {
